@@ -22,6 +22,10 @@ const (
 	entitlementsURL = "https://entitlements.auth.riotgames.com/api/token/v1"
 	userInfoURL     = "https://auth.riotgames.com/userinfo"
 	versionURL      = "https://valorant-api.com/v1/version"
+	storeURL        = "https://pd.%s.a.pvp.net/store/v3/storefront/%s"
+
+	// HTTP Headers
+	clientPlatform = "ew0KCSJwbGF0Zm9ybVR5cGUiOiAiUEMiLA0KCSJwbGF0Zm9ybU9TIjogIldpbmRvd3MiLA0KCSJwbGF0Zm9ybU9TVmVyc2lvbiI6ICIxMC4wLjE5MDQyLjEuMjU2LjY0Yml0IiwNCgkicGxhdGZvcm1DaGlwc2V0IjogIlVua25vd24iDQp9"
 
 	// 默认区域
 	defaultRegion = "ap"
@@ -109,29 +113,33 @@ func NewValorantAPI() (*ValorantAPI, error) {
 		Transport: transport,
 	}
 
-	// 创建一个用于获取版本的临时客户端
-	versionClient := &http.Client{
-		Timeout:   15 * time.Second,
-		Transport: transport,
-	}
-
 	// 备用的客户端版本，以防无法获取最新版本
-	fallbackClientVersion := "release-10.07-shipping-6-3399868"
-	fetchedClientVersion, err := fetchLatestClientVersion(versionClient)
-	currentClientVersion := fallbackClientVersion
+	currentClientVersion := "release-10.07-shipping-6-3399868"
 
-	if err != nil {
-		log.Printf("警告: 无法获取最新的客户端版本: %v。将使用备用版本: %s", err, fallbackClientVersion)
-	} else {
-		currentClientVersion = fetchedClientVersion
-		log.Printf("成功获取最新的客户端版本: %s", currentClientVersion)
-	}
-
+	// 创建API实例
 	api := &ValorantAPI{
 		client:        client,
 		region:        defaultRegion,
 		clientVersion: currentClientVersion,
 	}
+
+	// 异步获取最新版本，避免阻塞API初始化
+	go func() {
+		// 创建一个用于获取版本的临时客户端
+		versionClient := &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: transport,
+		}
+
+		fetchedClientVersion, err := fetchLatestClientVersion(versionClient)
+		if err != nil {
+			log.Printf("警告: 无法获取最新的客户端版本: %v。将使用备用版本: %s", err, currentClientVersion)
+		} else {
+			// 更新客户端版本
+			api.clientVersion = fetchedClientVersion
+			log.Printf("成功获取最新的客户端版本: %s", fetchedClientVersion)
+		}
+	}()
 
 	return api, nil
 }
@@ -163,8 +171,8 @@ func (v *ValorantAPI) SetRegion(region string) {
 	log.Printf("区域设置已更新: 输入=%s, 最终区域=%s\n", region, v.region)
 }
 
-// ParseCookieString 解析Cookie字符串为map
-func ParseCookieString(cookieStr string) map[string]string {
+// EnhancedParseCookieString 增强版Cookie解析函数，处理更多格式
+func EnhancedParseCookieString(cookieStr string) map[string]string {
 	cookieMap := make(map[string]string)
 
 	// 如果输入为空，返回空map
@@ -227,6 +235,11 @@ func ParseCookieString(cookieStr string) map[string]string {
 	return cookieMap
 }
 
+// ParseCookieString 解析Cookie字符串为map
+func ParseCookieString(cookieStr string) map[string]string {
+	return EnhancedParseCookieString(cookieStr)
+}
+
 // FilterEssentialCookies 过滤保留必要的Cookie
 func FilterEssentialCookies(cookies map[string]string) map[string]string {
 	essentialCookies := make(map[string]string)
@@ -251,19 +264,35 @@ func FilterEssentialCookies(cookies map[string]string) map[string]string {
 
 // AuthenticateWithCookies 使用Cookie进行认证
 func (v *ValorantAPI) AuthenticateWithCookies(cookies map[string]string) (*models.UserSession, error) {
-	// 过滤保留有用的Cookie
-	filteredCookies := FilterEssentialCookies(cookies)
-	if len(filteredCookies) == 0 {
-		return nil, errors.New("没有提供任何有效的Cookie")
+	// 直接使用authorize端点进行认证
+	log.Println("正在进行Cookie认证...")
+	session, err := v.authenticateWithCookiesViaAuthorizeEndpoint(cookies)
+	if err != nil {
+		return nil, fmt.Errorf("认证失败: %w", err)
 	}
 
+	// 获取用户信息并设置Riot用户名
+	userInfo, err := v.getUserInfo(session.AccessToken)
+	if err != nil {
+		return nil, fmt.Errorf("获取用户信息失败: %w", err)
+	}
+
+	session.RiotUsername = userInfo.Name
+	session.RiotTagline = userInfo.Tag
+	session.Region = v.region
+
+	return session, nil
+}
+
+// authenticateWithCookiesViaAuthorizeEndpoint 通过authorize端点进行认证
+func (v *ValorantAPI) authenticateWithCookiesViaAuthorizeEndpoint(cookies map[string]string) (*models.UserSession, error) {
 	// 创建带有cookie jar的新HTTP客户端
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// 禁用重定向的客户端
+	// 使用禁用重定向的客户端 - 这一点很重要
 	client := &http.Client{
 		Jar:     jar,
 		Timeout: 30 * time.Second,
@@ -273,29 +302,46 @@ func (v *ValorantAPI) AuthenticateWithCookies(cookies map[string]string) (*model
 		},
 	}
 
-	// 使用这个带cookie的客户端替换当前的客户端
+	// 保存原始客户端
+	originalClient := v.client
+	// 使用新客户端替换当前的客户端
 	v.client = client
+	// 在函数结束时恢复原始客户端
+	defer func() {
+		v.client = originalClient
+	}()
 
-	// 构建authorize URL
+	// 过滤保留有用的Cookie
+	essentialCookies := FilterEssentialCookies(cookies)
+	if len(essentialCookies) == 0 {
+		return nil, errors.New("没有提供任何有效的Cookie")
+	}
+
+	// 通过authorize端点获取token
+	// 构建请求URL
 	authURL := "https://auth.riotgames.com/authorize?redirect_uri=https%3A%2F%2Fplayvalorant.com%2Fopt_in&client_id=play-valorant-web-prod&response_type=token%20id_token&scope=account%20openid&nonce=1"
 
 	// 创建请求
 	req, err := http.NewRequest(http.MethodGet, authURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
+		return nil, fmt.Errorf("创建authorize请求失败: %w", err)
 	}
 
-	// 添加请求头
-	v.setRiotRequestHeaders(req, filteredCookies)
+	// 添加所有必要的头部和Cookie
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "RiotClient/"+v.clientVersion)
+	for name, value := range essentialCookies {
+		req.AddCookie(&http.Cookie{Name: name, Value: value})
+	}
 
 	// 发送请求
 	resp, err := v.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("发送请求失败: %w", err)
+		return nil, fmt.Errorf("发送authorize请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// 检查状态码
+	// 检查状态码，应该是302或303（重定向）
 	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("认证请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(bodyBytes))
@@ -339,79 +385,70 @@ func (v *ValorantAPI) AuthenticateWithCookies(cookies map[string]string) (*model
 		Username:     userInfo.Email,
 		AccessToken:  accessToken,
 		Entitlement:  entitlementToken,
-		RiotUsername: userInfo.Acct.GameName,
-		RiotTagline:  userInfo.Acct.TagLine,
-		Cookies:      filteredCookies,
+		RiotUsername: userInfo.Name,
+		RiotTagline:  userInfo.Tag,
+		Cookies:      essentialCookies,
 	}
 
 	return session, nil
 }
 
-// 设置Riot请求头
+// setRiotRequestHeaders 设置Riot API请求头
 func (v *ValorantAPI) setRiotRequestHeaders(req *http.Request, cookies map[string]string) {
-	// 设置常规请求头
-	req.Header.Set("User-Agent", "RiotClient/62.0.1.4852791.4789131 rso-auth (Windows;10;;Professional, x64)")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("Origin", "https://auth.riotgames.com")
-	req.Header.Set("DNT", "1")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("X-Riot-ClientVersion", v.clientVersion) // 添加客户端版本
+	// 添加通用头
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "RiotClient/"+v.clientVersion)
 
 	// 添加Cookie
-	var cookieStrings []string
 	for name, value := range cookies {
-		cookieStrings = append(cookieStrings, fmt.Sprintf("%s=%s", name, value))
-	}
-	cookieHeader := strings.Join(cookieStrings, "; ")
-	if cookieHeader != "" {
-		req.Header.Set("Cookie", cookieHeader)
+		req.Header.Add("Cookie", name+"="+value)
 	}
 }
 
-// 从URI中提取访问令牌
+// parseAccessTokenFromURI 从URI解析访问令牌
 func parseAccessTokenFromURI(uri string) (string, error) {
-	startIndex := strings.Index(uri, "access_token=")
-	if startIndex == -1 {
-		return "", errors.New("URI中没有access_token参数")
-	}
-	startIndex += len("access_token=")
-
-	endIndex := strings.Index(uri[startIndex:], "&")
-	if endIndex == -1 {
-		return uri[startIndex:], nil
+	if uri == "" {
+		return "", errors.New("空URI")
 	}
 
-	return uri[startIndex : startIndex+endIndex], nil
+	// 例如: https://playvalorant.com/opt_in#access_token=eyJh...&scope=...
+	hashParts := strings.Split(uri, "#")
+	if len(hashParts) < 2 {
+		return "", errors.New("URI中没有找到#部分")
+	}
+
+	params := strings.Split(hashParts[1], "&")
+	for _, param := range params {
+		if strings.HasPrefix(param, "access_token=") {
+			token := strings.TrimPrefix(param, "access_token=")
+			return token, nil
+		}
+	}
+
+	return "", errors.New("未在URI中找到访问令牌")
 }
 
-// 获取授权令牌
+// getEntitlementToken 获取授权令牌
 func (v *ValorantAPI) getEntitlementToken(accessToken string) (string, error) {
 	req, err := http.NewRequest(http.MethodPost, entitlementsURL, nil)
 	if err != nil {
 		return "", err
 	}
 
-	// 设置授权头
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Riot-ClientVersion", v.clientVersion) // 添加客户端版本
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+accessToken)
 
-	// 发送请求
 	resp, err := v.client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	// 检查状态码
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("获取授权令牌失败，状态码: %d, 响应: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// 解析响应
 	var entitlementResp models.ValorantEntitlementResponse
 	if err := json.NewDecoder(resp.Body).Decode(&entitlementResp); err != nil {
 		return "", err
@@ -420,35 +457,168 @@ func (v *ValorantAPI) getEntitlementToken(accessToken string) (string, error) {
 	return entitlementResp.EntitlementToken, nil
 }
 
-// 获取用户信息
+// getUserInfo 获取用户信息
 func (v *ValorantAPI) getUserInfo(accessToken string) (*models.ValorantUserInfoResponse, error) {
 	req, err := http.NewRequest(http.MethodGet, userInfoURL, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// 设置授权头
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("X-Riot-ClientVersion", v.clientVersion) // 添加客户端版本
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+accessToken)
 
-	// 发送请求
 	resp, err := v.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// 检查状态码
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("获取用户信息失败，状态码: %d, 响应: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// 解析响应
 	var userInfo models.ValorantUserInfoResponse
 	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
 		return nil, err
 	}
 
+	// 如果Acct字段中有数据，使用它作为最优先的游戏名称和标签
+	if userInfo.Acct.GameName != "" {
+		userInfo.Name = userInfo.Acct.GameName
+		userInfo.Tag = userInfo.Acct.TagLine
+	}
+
 	return &userInfo, nil
+}
+
+// GetStoreOffers 获取商店物品
+func (v *ValorantAPI) GetStoreOffers(userID, accessToken, entitlementToken string) (*models.ValorantStoreResponse, error) {
+	// 确保使用有效的区域设置
+	if v.region == "" {
+		v.region = defaultRegion
+		log.Printf("警告：未设置区域，将使用默认区域: %s\n", defaultRegion)
+	}
+
+	log.Printf("区域检查: 当前使用的区域是 %s\n", v.region)
+
+	// 构建URL
+	url := fmt.Sprintf(storeURL, v.region, userID)
+
+	// 打印基本日志（不包含可能的敏感信息）
+	log.Printf("正在请求商店数据，URL: %s\n", url)
+
+	// 创建请求 - 使用POST方法
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader("{}"))
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %w", err)
+	}
+
+	// 设置完整的请求头
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Riot-ClientPlatform", clientPlatform)
+	req.Header.Set("X-Riot-ClientVersion", v.clientVersion)
+	req.Header.Set("X-Riot-Entitlements-JWT", entitlementToken)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	// 不输出请求头详细信息以避免泄露敏感数据
+	log.Println("请求头已设置（敏感信息已隐藏）")
+
+	resp, err := v.client.Do(req)
+	if err != nil {
+		log.Printf("获取商店数据失败: %v\n", err)
+		return nil, fmt.Errorf("获取商店物品失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 检查响应状态
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyStr := string(bodyBytes)
+
+		log.Printf("请求失败: 状态码: %d\n", resp.StatusCode)
+		log.Printf("响应体: %s\n", bodyStr)
+
+		// 针对特定错误提供更具体的错误信息
+		if resp.StatusCode == 404 {
+			log.Printf("警告: 获取到404错误，这可能意味着API接口路径已更改或用户区域不正确\n")
+		} else if resp.StatusCode == 405 {
+			log.Printf("警告: 获取到405错误，这表明请求方法不被允许\n")
+		}
+
+		return nil, fmt.Errorf("获取商店数据失败，状态码: %d, 响应: %s", resp.StatusCode, bodyStr)
+	}
+
+	// 解析响应
+	var storeResp models.ValorantStoreResponse
+	if err := json.NewDecoder(resp.Body).Decode(&storeResp); err != nil {
+		return nil, fmt.Errorf("解析商店数据失败: %w", err)
+	}
+
+	log.Printf("成功获取商店数据\n")
+	return &storeResp, nil
+}
+
+// GetStoreOffersRaw 获取商店物品的原始JSON响应
+func (v *ValorantAPI) GetStoreOffersRaw(userID, accessToken, entitlementToken string) ([]byte, error) {
+	// 确保使用有效的区域设置
+	if v.region == "" {
+		v.region = defaultRegion
+		log.Printf("警告：未设置区域，将使用默认区域: %s\n", defaultRegion)
+	}
+
+	log.Printf("区域检查: 当前使用的区域是 %s\n", v.region)
+
+	// 构建URL
+	url := fmt.Sprintf(storeURL, v.region, userID)
+
+	// 打印基本日志（不包含可能的敏感信息）
+	log.Printf("正在请求商店数据，URL: %s\n", url)
+
+	// 创建请求 - 使用POST方法
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader("{}"))
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %w", err)
+	}
+
+	// 设置完整的请求头
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Riot-ClientPlatform", clientPlatform)
+	req.Header.Set("X-Riot-ClientVersion", v.clientVersion)
+	req.Header.Set("X-Riot-Entitlements-JWT", entitlementToken)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	// 不输出请求头详细信息以避免泄露敏感数据
+	log.Println("请求头已设置（敏感信息已隐藏）")
+
+	resp, err := v.client.Do(req)
+	if err != nil {
+		log.Printf("获取商店数据失败: %v\n", err)
+		return nil, fmt.Errorf("获取商店物品失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 读取完整响应体
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应体失败: %w", err)
+	}
+
+	// 检查响应状态
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("请求失败: 状态码: %d\n", resp.StatusCode)
+		log.Printf("响应体: %s\n", string(bodyBytes))
+
+		// 针对特定错误提供更具体的错误信息
+		if resp.StatusCode == 404 {
+			log.Printf("警告: 获取到404错误，这可能意味着API接口路径已更改或用户区域不正确\n")
+		} else if resp.StatusCode == 405 {
+			log.Printf("警告: 获取到405错误，这表明请求方法不被允许\n")
+		}
+
+		return nil, fmt.Errorf("获取商店数据失败，状态码: %d", resp.StatusCode)
+	}
+
+	log.Printf("成功获取商店数据\n")
+	return bodyBytes, nil
 }

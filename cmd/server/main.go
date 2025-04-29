@@ -33,8 +33,8 @@ func main() {
 	server := &http.Server{
 		Addr:         ":" + port,
 		Handler:      app,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
 	}
 
 	// 启动服务器

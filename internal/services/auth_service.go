@@ -97,8 +97,11 @@ func (s *AuthService) generateJWT(session *models.UserSession) (string, error) {
 
 	// 设置JWT声明
 	claims := models.JWTClaims{
-		UserID:   session.UserID,
-		Username: formattedUsername,
+		UserID:           session.UserID,
+		Username:         formattedUsername,
+		AccessToken:      session.AccessToken,
+		EntitlementToken: session.Entitlement,
+		Region:           session.Region,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.tokenExpiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
