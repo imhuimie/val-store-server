@@ -200,10 +200,11 @@ type UpgradeCurrencyStore struct {
 
 // UpgradeCurrencyOffer 升级币商店中的物品
 type UpgradeCurrencyOffer struct {
-	OfferID          string   `json:"OfferID"`
-	StorefrontItemID string   `json:"StorefrontItemID"`
-	Offer            ItemInfo `json:"Offer"`
-	Cost             int      `json:"Cost"`
+	OfferID          string `json:"OfferID"`
+	StorefrontItemID string `json:"StorefrontItemID"`
+	Offer            Offer  `json:"Offer"`
+	DiscountPercent  int    `json:"DiscountPercent"`
+	//Cost             int    `json:"Cost"`
 }
 
 // ValorantWalletResponse 用户钱包/余额信息

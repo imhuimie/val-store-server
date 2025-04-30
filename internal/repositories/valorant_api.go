@@ -114,7 +114,7 @@ func NewValorantAPI() (*ValorantAPI, error) {
 	}
 
 	// 备用的客户端版本，以防无法获取最新版本
-	currentClientVersion := "release-10.07-shipping-6-3399868"
+	currentClientVersion := "release-10.08-shipping-6-3422747"
 
 	// 创建API实例
 	api := &ValorantAPI{
