@@ -33,4 +33,7 @@ Thumbs.db
 /temp/
 
 # 依赖目录
-/vendor/ 
+/vendor/
+
+# 其他可执行文件
+vstore-get

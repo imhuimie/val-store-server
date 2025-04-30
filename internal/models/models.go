@@ -189,8 +189,8 @@ type AccessoryStore struct {
 
 // AccessoryStoreOffer 配件商店中的物品
 type AccessoryStoreOffer struct {
-	Offer      ItemInfo `json:"Offer"`
-	ContractID string   `json:"ContractID"`
+	Offer      Offer  `json:"Offer"`
+	ContractID string `json:"ContractID"`
 }
 
 // UpgradeCurrencyStore 升级币商店
